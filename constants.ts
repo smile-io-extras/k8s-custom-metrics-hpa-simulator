@@ -1,5 +1,7 @@
 import { SimulatorConfig } from './types';
 
+export const HPA_SYNC_PERIOD = 15; // HPA control loop runs every 15s
+
 export const DEFAULT_CONFIG: SimulatorConfig = {
   metricType: 'QueueLatency',
   minPods: 2,
