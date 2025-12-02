@@ -1,6 +1,6 @@
 export type ScalePolicyType = 'Pods' | 'Percent';
 export type SelectPolicy = 'Max' | 'Min' | 'Disabled';
-export type MetricType = 'QueueLatency';
+export type MetricType = 'QueueLatency' | 'QueueLength';
 
 export interface ScalePolicy {
   id: string; // unique id for UI list handling

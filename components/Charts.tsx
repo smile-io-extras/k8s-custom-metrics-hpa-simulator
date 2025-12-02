@@ -141,6 +141,11 @@ export const Charts: React.FC<Props> = ({ data, targetMetricValue, metricType })
               label={{ value: 'Jobs in Queue', angle: -90, position: 'insideLeft', fontSize: 10, fill: '#64748b' }}
             />
             <Tooltip content={<CustomTooltip />} />
+            
+            {metricType === 'QueueLength' && (
+               <ReferenceLine y={targetMetricValue} stroke="#ef4444" strokeDasharray="3 3" label={{ value: 'Target', fill: '#ef4444', fontSize: 10, position: 'insideTopRight' }} />
+            )}
+
             <Legend verticalAlign="top" height={36} iconSize={10} wrapperStyle={{fontSize: '12px'}}/>
 
             <Line

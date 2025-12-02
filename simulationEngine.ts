@@ -35,9 +35,12 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
   // If queue is 0 but metric value is set (and metric is latency), infer queue size
   let currentQueue = (typeof config.initialQueueJobs === 'number' && !isNaN(config.initialQueueJobs)) ? config.initialQueueJobs : 0;
   
-  if (config.metricType === 'QueueLatency') {
-      if (currentQueue === 0 && config.initialMetricValue > 0 && currentPods > 0) {
+  // Infer initial queue based on metric type if specific queue not set
+  if (currentQueue === 0 && config.initialMetricValue > 0) {
+      if (config.metricType === 'QueueLatency' && currentPods > 0) {
         currentQueue = Math.ceil(config.initialMetricValue * currentPods * procRate);
+      } else if (config.metricType === 'QueueLength') {
+        currentQueue = Math.ceil(config.initialMetricValue);
       }
   }
 
@@ -84,6 +87,8 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
     let currentMetricValue = 0;
     if (config.metricType === 'QueueLatency') {
         currentMetricValue = currentLatency;
+    } else if (config.metricType === 'QueueLength') {
+        currentMetricValue = currentQueue;
     }
 
     // 3. Queue Dynamics (Process & Produce)
