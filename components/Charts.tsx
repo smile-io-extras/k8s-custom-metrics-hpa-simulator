@@ -1,6 +1,6 @@
 import React from 'react';
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine, Area
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine
 } from 'recharts';
 import { SimulationPoint } from '../types';
 
@@ -134,13 +134,13 @@ export const Charts: React.FC<Props> = ({ data, targetLatency }) => {
             <Tooltip content={<CustomTooltip />} />
             <Legend verticalAlign="top" height={36} iconSize={10} wrapperStyle={{fontSize: '12px'}}/>
 
-            <Area
+            <Line
               type="monotone"
               dataKey="queueJobs"
               name="Queue Size"
-              fill="#e0e7ff"
               stroke="#818cf8"
-              fillOpacity={0.6}
+              strokeWidth={2}
+              dot={false}
               isAnimationActive={false}
             />
           </LineChart>

@@ -16,13 +16,27 @@ const getLimitValue = (
 export const runSimulation = (config: SimulatorConfig): SimulationResult => {
   const points: SimulationPoint[] = [];
   
+  // 0. Input Sanitization
+  // Ensure we don't crash on NaN or undefined inputs while typing
+  const simSeconds = (typeof config.simulationSeconds === 'number' && !isNaN(config.simulationSeconds) && config.simulationSeconds >= 0) 
+    ? config.simulationSeconds 
+    : 600;
+  
+  const minPods = (typeof config.minPods === 'number' && !isNaN(config.minPods)) ? Math.max(0, config.minPods) : 1;
+  const maxPods = (typeof config.maxPods === 'number' && !isNaN(config.maxPods)) ? Math.max(minPods, config.maxPods) : Math.max(minPods, 20);
+  const startingPods = (typeof config.startingPods === 'number' && !isNaN(config.startingPods)) ? Math.max(0, config.startingPods) : 1;
+  const targetLatency = (typeof config.targetLatencySeconds === 'number' && !isNaN(config.targetLatencySeconds) && config.targetLatencySeconds > 0) ? config.targetLatencySeconds : 1;
+  const procRate = (typeof config.processingRatePerPod === 'number' && !isNaN(config.processingRatePerPod)) ? config.processingRatePerPod : 1;
+  const prodRate = (typeof config.producingRateTotal === 'number' && !isNaN(config.producingRateTotal)) ? config.producingRateTotal : 0;
+  const tolerance = (typeof config.toleranceFraction === 'number' && !isNaN(config.toleranceFraction)) ? config.toleranceFraction : 0.1;
+
   // Initialize state
-  let currentPods = config.startingPods;
+  let currentPods = startingPods;
   
   // If queue is 0 but latency is set, infer queue size
-  let currentQueue = config.initialQueueJobs;
+  let currentQueue = (typeof config.initialQueueJobs === 'number' && !isNaN(config.initialQueueJobs)) ? config.initialQueueJobs : 0;
   if (currentQueue === 0 && config.initialLatencySeconds > 0 && currentPods > 0) {
-    currentQueue = Math.ceil(config.initialLatencySeconds * currentPods * config.processingRatePerPod);
+    currentQueue = Math.ceil(config.initialLatencySeconds * currentPods * procRate);
   }
 
   // History for stabilization and policies
@@ -54,13 +68,13 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
   let scaleUps = 0;
   let scaleDowns = 0;
 
-  for (let t = 0; t <= config.simulationSeconds; t++) {
+  for (let t = 0; t <= simSeconds; t++) {
     // 1. Calculate inputs for this tick
     // Note: Latency is calculated based on start-of-tick state
     let latency = 0;
-    const processingCapacity = currentPods * config.processingRatePerPod;
+    const processingCapacity = currentPods * procRate;
     
-    if (currentPods > 0 && config.processingRatePerPod > 0) {
+    if (currentPods > 0 && procRate > 0) {
       latency = currentQueue / processingCapacity;
     } else if (currentQueue > 0) {
       latency = 9999; // Infinite latency
@@ -69,21 +83,21 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
     }
 
     // 2. Queue Dynamics (Process & Produce)
-    const arrivals = config.producingRateTotal; // 1 second interval
+    const arrivals = prodRate; // 1 second interval
     const processed = Math.min(currentQueue + arrivals, processingCapacity);
     const nextQueue = Math.max(0, currentQueue + arrivals - processed);
 
     // 3. HPA Core Formula
     let desiredReplicasRaw = currentPods;
-    const ratio = latency / config.targetLatencySeconds;
+    const ratio = latency / targetLatency;
     
     // Apply tolerance
-    if (Math.abs(ratio - 1.0) > config.toleranceFraction) {
+    if (Math.abs(ratio - 1.0) > tolerance) {
       desiredReplicasRaw = Math.ceil(currentPods * ratio);
     }
 
     // Initial clamping
-    desiredReplicasRaw = Math.min(Math.max(desiredReplicasRaw, config.minPods), config.maxPods);
+    desiredReplicasRaw = Math.min(Math.max(desiredReplicasRaw, minPods), maxPods);
     
     // Store raw recommendation for stabilization lookback
     desiredReplicasHistory.push(desiredReplicasRaw);
@@ -96,7 +110,7 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
 
     // Scale Up Stabilization: Min of window
     // (We use desiredReplicasHistory which includes current 't')
-    if (config.scaleUp.stabilizationWindowSeconds > 0) {
+    if (config.scaleUp && config.scaleUp.stabilizationWindowSeconds > 0) {
       let minInWindow = desiredReplicasRaw;
       for (let i = 0; i <= config.scaleUp.stabilizationWindowSeconds; i++) {
         const val = getDesiredReplicaAt(t - i);
@@ -104,14 +118,13 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
       }
       // If our raw intent is to scale up (raw > current), limits apply.
       // If raw < current, we use the raw (which might be handled by down stabilization)
-      // Standard algorithm: Calculate separate stabilized proposals.
       if (desiredReplicasRaw > currentPods) {
           stabilizedRecommendation = minInWindow; 
       }
     }
 
     // Scale Down Stabilization: Max of window
-    if (config.scaleDown.stabilizationWindowSeconds > 0) {
+    if (config.scaleDown && config.scaleDown.stabilizationWindowSeconds > 0) {
       let maxInWindow = desiredReplicasRaw;
       for (let i = 0; i <= config.scaleDown.stabilizationWindowSeconds; i++) {
         const val = getDesiredReplicaAt(t - i);
@@ -135,7 +148,7 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
       direction = 'down';
     }
 
-    if (direction === 'up') {
+    if (direction === 'up' && config.scaleUp) {
       const behavior = config.scaleUp;
       if (behavior.selectPolicy === 'Disabled') {
         desiredReplicasEffective = currentPods;
@@ -158,7 +171,7 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
           desiredReplicasEffective = Math.min(stabilizedRecommendation, limit);
         }
       }
-    } else if (direction === 'down') {
+    } else if (direction === 'down' && config.scaleDown) {
       const behavior = config.scaleDown;
       if (behavior.selectPolicy === 'Disabled') {
         desiredReplicasEffective = currentPods;
@@ -174,17 +187,7 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
            // For scale down:
            // 'Max' policy means we allow the MAXIMUM reduction? 
            // NO. 'selectPolicy' chooses which *policy value* to use.
-           // However, K8s docs say: "selectPolicy... Min... allows the smallest change in replica count."
-           // So for Scale Down:
-           //   limit1 (pods=1) -> allows removing 1 pod. Target = Current - 1.
-           //   limit2 (percent=10%) -> allows removing 10%. Target = Current * 0.9.
-           //   Max policy -> Allows maximum change (remove more). Result is min(Target1, Target2).
-           //   Min policy -> Allows minimum change (remove fewer). Result is max(Target1, Target2).
-           
-           // Let's rephrase in terms of "Resulting Pods":
-           // limit1_floor = 10. limit2_floor = 15.
-           // "Max" change means going lower. So min(10, 15) = 10.
-           // "Min" change means staying higher. So max(10, 15) = 15.
+           // Min policy -> Allows minimum change (remove fewer). Result is max(Target1, Target2).
            
            const limit = behavior.selectPolicy === 'Min'
              ? Math.max(...allowedPods) // Minimum change = highest floor
@@ -196,7 +199,7 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
     }
 
     // 6. Final Clamping & Update
-    desiredReplicasEffective = Math.min(Math.max(desiredReplicasEffective, config.minPods), config.maxPods);
+    desiredReplicasEffective = Math.min(Math.max(desiredReplicasEffective, minPods), maxPods);
     
     // Check if a scaling event actually happened
     if (desiredReplicasEffective > currentPods) scaleUps++;
@@ -217,6 +220,21 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
     podHistory.push(desiredReplicasEffective);
     currentPods = desiredReplicasEffective;
     currentQueue = nextQueue;
+  }
+
+  // Handle case where simulation ran 0 seconds or failed to produce points
+  if (points.length === 0) {
+    return {
+      points: [],
+      summary: {
+        maxLatency: 0,
+        maxQueueJobs: 0,
+        finalPods: startingPods,
+        finalQueueJobs: 0,
+        totalScaleUps: 0,
+        totalScaleDowns: 0
+      }
+    };
   }
 
   // Calculate Summary
