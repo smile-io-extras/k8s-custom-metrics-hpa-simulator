@@ -1,11 +1,11 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { SimulatorConfig } from './types';
+import React, { useState, useEffect } from 'react';
+import { SimulatorConfig, MetricType } from './types';
 import { DEFAULT_CONFIG } from './constants';
 import { runSimulation } from './simulationEngine';
-import { Card, NumberInput, Button } from './components/UI';
+import { Card, NumberInput, Select, Button } from './components/UI';
 import { BehaviorForm } from './components/BehaviorForm';
 import { Charts } from './components/Charts';
-import { Settings, Play, RotateCcw, Activity, Server, Clock, ArrowUp, ArrowDown } from 'lucide-react';
+import { Settings, Play, RotateCcw, Activity, Server, Clock, ArrowUp, ArrowDown, Target } from 'lucide-react';
 
 const App: React.FC = () => {
   const [config, setConfig] = useState<SimulatorConfig>(DEFAULT_CONFIG);
@@ -33,6 +33,9 @@ const App: React.FC = () => {
 
   // Helper to update shallow top-level config fields
   const updateConfig = (field: keyof SimulatorConfig, value: any) => {
+    // If value is NaN (user cleared input), passing it to state is fine as engine handles sanitization,
+    // but cleaner to pass undefined or keep as string in a real form library.
+    // For this simple app, we pass it through.
     setConfig(prev => ({ ...prev, [field]: value }));
   };
 
@@ -89,34 +92,45 @@ const App: React.FC = () => {
                 {activeTab === 'workload' && (
                   <div className="space-y-6">
                     <div>
+                      <h4 className="text-sm font-bold text-slate-900 mb-3 flex items-center"><Target size={14} className="mr-2"/> Metric Settings</h4>
+                      <Select 
+                        label="Metric Type" 
+                        value={config.metricType} 
+                        onChange={e => updateConfig('metricType', e.target.value as MetricType)}
+                        options={[
+                          { value: 'QueueLatency', label: 'Queue Latency' },
+                          { value: 'QueueLength', label: 'Queue Length' },
+                          { value: 'AvgCPULoad', label: 'Avg CPU Load (%)' },
+                        ]} 
+                      />
+                      <div className="grid grid-cols-2 gap-3 mt-2">
+                        <NumberInput label="Target Value" value={config.targetMetricValue} onChange={e => updateConfig('targetMetricValue', parseFloat(e.target.value))} />
+                        <NumberInput label="Start Value" value={config.initialMetricValue} onChange={e => updateConfig('initialMetricValue', parseFloat(e.target.value))} disabled={config.initialQueueJobs > 0} className={config.initialQueueJobs > 0 ? 'opacity-50' : ''} />
+                      </div>
+                    </div>
+
+                    <div className="border-t border-slate-100 pt-4">
                       <h4 className="text-sm font-bold text-slate-900 mb-3 flex items-center"><Server size={14} className="mr-2"/> Pod Limits</h4>
                       <div className="grid grid-cols-2 gap-3">
                         <NumberInput label="Min Pods" value={config.minPods} onChange={e => updateConfig('minPods', parseInt(e.target.value))} />
                         <NumberInput label="Max Pods" value={config.maxPods} onChange={e => updateConfig('maxPods', parseInt(e.target.value))} />
                         <NumberInput label="Start Pods" value={config.startingPods} onChange={e => updateConfig('startingPods', parseInt(e.target.value))} />
+                        <NumberInput label="Pod Startup Delay (s)" value={config.podStartupDelay} onChange={e => updateConfig('podStartupDelay', parseInt(e.target.value))} />
                       </div>
                     </div>
 
                     <div className="border-t border-slate-100 pt-4">
-                      <h4 className="text-sm font-bold text-slate-900 mb-3 flex items-center"><Settings size={14} className="mr-2"/> Job Throughput</h4>
+                      <h4 className="text-sm font-bold text-slate-900 mb-3 flex items-center"><Settings size={14} className="mr-2"/> Queue Throughput</h4>
                       <div className="grid grid-cols-1 gap-3">
                         <NumberInput label="Production Rate (Jobs/Sec total)" value={config.producingRateTotal} onChange={e => updateConfig('producingRateTotal', parseFloat(e.target.value))} />
                         <NumberInput label="Process Rate (Jobs/Sec/Pod)" value={config.processingRatePerPod} onChange={e => updateConfig('processingRatePerPod', parseFloat(e.target.value))} />
+                        <NumberInput label="Initial Queue Jobs" value={config.initialQueueJobs} onChange={e => updateConfig('initialQueueJobs', parseInt(e.target.value))} />
                       </div>
                     </div>
 
                     <div className="border-t border-slate-100 pt-4">
-                      <h4 className="text-sm font-bold text-slate-900 mb-3 flex items-center"><Activity size={14} className="mr-2"/> Initial State</h4>
+                      <h4 className="text-sm font-bold text-slate-900 mb-3 flex items-center"><Clock size={14} className="mr-2"/> Simulation Control</h4>
                       <div className="grid grid-cols-2 gap-3">
-                        <NumberInput label="Initial Queue" value={config.initialQueueJobs} onChange={e => updateConfig('initialQueueJobs', parseInt(e.target.value))} />
-                        <NumberInput label="Start Latency (s)" value={config.initialLatencySeconds} onChange={e => updateConfig('initialLatencySeconds', parseFloat(e.target.value))} disabled={config.initialQueueJobs > 0} className={config.initialQueueJobs > 0 ? 'opacity-50' : ''} />
-                      </div>
-                    </div>
-
-                    <div className="border-t border-slate-100 pt-4">
-                      <h4 className="text-sm font-bold text-slate-900 mb-3 flex items-center"><Clock size={14} className="mr-2"/> Simulation Target</h4>
-                      <div className="grid grid-cols-2 gap-3">
-                        <NumberInput label="Target Latency (s)" value={config.targetLatencySeconds} onChange={e => updateConfig('targetLatencySeconds', parseFloat(e.target.value))} />
                         <NumberInput label="Tolerance (0.1 = 10%)" value={config.toleranceFraction} step={0.01} onChange={e => updateConfig('toleranceFraction', parseFloat(e.target.value))} />
                         <div className="col-span-2">
                            <NumberInput label="Simulation Duration (sec)" value={config.simulationSeconds} onChange={e => updateConfig('simulationSeconds', parseInt(e.target.value))} />
@@ -158,9 +172,9 @@ const App: React.FC = () => {
             {/* Stats Summary */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
               <Card className="flex flex-col items-center justify-center p-4">
-                <span className="text-xs font-semibold text-slate-500 uppercase">Max Latency</span>
-                <span className={`text-2xl font-bold ${simulationResult.summary.maxLatency > config.targetLatencySeconds * 1.5 ? 'text-red-600' : 'text-slate-800'}`}>
-                  {simulationResult.summary.maxLatency.toFixed(2)}s
+                <span className="text-xs font-semibold text-slate-500 uppercase">Max Value</span>
+                <span className={`text-2xl font-bold ${simulationResult.summary.maxMetricValue > config.targetMetricValue * 1.5 ? 'text-red-600' : 'text-slate-800'}`}>
+                  {simulationResult.summary.maxMetricValue.toFixed(2)}
                 </span>
               </Card>
               <Card className="flex flex-col items-center justify-center p-4">
@@ -184,14 +198,21 @@ const App: React.FC = () => {
               </Card>
             </div>
 
-            <Charts data={simulationResult.points} targetLatency={config.targetLatencySeconds} />
+            <Charts 
+              data={simulationResult.points} 
+              targetMetricValue={config.targetMetricValue} 
+              metricType={config.metricType}
+            />
 
             <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 text-sm text-blue-800">
               <p className="font-semibold mb-1">About this Simulation</p>
               <p className="opacity-90 leading-relaxed">
-                This tool simulates Kubernetes HPA v2 behavior on a discrete 1-second interval. It calculates latency based on queue depth and processing capacity. 
+                This tool simulates Kubernetes HPA v2 behavior on a discrete 1-second interval. It calculates the metric 
+                (<b>{config.metricType === 'QueueLatency' ? 'Queue Latency' : config.metricType === 'QueueLength' ? 'Queue Length' : 'Average CPU Load'}</b>) 
+                based on queue depth and processing capacity. 
                 Desired replicas are computed via <code>ceil(currentReplicas * (currentMetric / targetMetric))</code>. 
                 Stabilization windows use the conservative approach (Min for ScaleUp, Max for ScaleDown) over the window duration.
+                Scale Up events incur a pod startup delay if configured.
               </p>
             </div>
           </div>

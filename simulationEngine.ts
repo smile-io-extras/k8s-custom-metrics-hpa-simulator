@@ -1,4 +1,5 @@
-import { SimulatorConfig, SimulationResult, SimulationPoint, ScaleBehavior } from './types';
+import { SimulatorConfig, SimulationResult, SimulationPoint } from './types';
+import { HPA_SYNC_PERIOD } from './constants';
 
 // Helper to get logic specific value based on policy
 const getLimitValue = (
@@ -16,13 +17,41 @@ const getLimitValue = (
 export const runSimulation = (config: SimulatorConfig): SimulationResult => {
   const points: SimulationPoint[] = [];
   
-  // Initialize state
-  let currentPods = config.startingPods;
+  // 0. Input Sanitization
+  const simSeconds = Number(config.simulationSeconds) > 0 ? Number(config.simulationSeconds) : 600;
   
-  // If queue is 0 but latency is set, infer queue size
-  let currentQueue = config.initialQueueJobs;
-  if (currentQueue === 0 && config.initialLatencySeconds > 0 && currentPods > 0) {
-    currentQueue = Math.ceil(config.initialLatencySeconds * currentPods * config.processingRatePerPod);
+  const minPods = Number(config.minPods) >= 0 ? Number(config.minPods) : 1;
+  const maxPods = Number(config.maxPods) >= minPods ? Number(config.maxPods) : Math.max(minPods, 20);
+  const startingPods = Number(config.startingPods) >= 0 ? Number(config.startingPods) : 1;
+  const targetMetric = Number(config.targetMetricValue) > 0 ? Number(config.targetMetricValue) : 1;
+  const procRate = Number(config.processingRatePerPod) >= 0 ? Number(config.processingRatePerPod) : 1;
+  const prodRate = Number(config.producingRateTotal) >= 0 ? Number(config.producingRateTotal) : 0;
+  const tolerance = Number(config.toleranceFraction) >= 0 ? Number(config.toleranceFraction) : 0.1;
+  const podDelay = Number(config.podStartupDelay) >= 0 ? Number(config.podStartupDelay) : 0;
+
+  // Initialize state
+  let currentPods = startingPods; // Total Replicas
+  
+  // Logic for ready pods:
+  // We assume startingPods are fully ready at t=0
+  let readyPods = currentPods;
+  
+  // Track pods that are starting up. 
+  // Each entry represents "seconds remaining until ready" for a batch of pods.
+  let pendingPods: number[] = []; 
+
+  // If queue is 0 but metric value is set (and metric is latency), infer queue size
+  let currentQueue = Number(config.initialQueueJobs) >= 0 ? Number(config.initialQueueJobs) : 0;
+  
+  // Infer initial queue based on metric type if specific queue not set
+  if (currentQueue === 0 && Number(config.initialMetricValue) > 0) {
+      if (config.metricType === 'QueueLatency' && currentPods > 0) {
+        currentQueue = Math.ceil(Number(config.initialMetricValue) * currentPods * procRate);
+      } else if (config.metricType === 'QueueLength') {
+        currentQueue = Math.ceil(Number(config.initialMetricValue));
+      }
+      // For AvgCPULoad, initial metric value doesn't map directly to queue easily without more assumptions (it maps to processed jobs), 
+      // so we ignore it for queue initialization to keep it simple, or user sets initialQueueJobs directly.
   }
 
   // History for stabilization and policies
@@ -31,14 +60,13 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
   const podHistory: number[] = []; // Stores pod count at each second
 
   // Pre-fill history for t < 0 to handle initial lookbacks cleanly
-  // We assume the state was constant before t=0
-  const preFillHistorySize = 3600; // ample buffer
+  const preFillHistorySize = 3600; 
   for (let i = 0; i < preFillHistorySize; i++) {
     desiredReplicasHistory.push(currentPods);
     podHistory.push(currentPods);
   }
   
-  // Accessor helpers that handle the offset
+  // Accessor helpers
   const getDesiredReplicaAt = (t: number) => {
     const idx = t + preFillHistorySize;
     if (idx < 0) return currentPods; 
@@ -54,180 +82,250 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
   let scaleUps = 0;
   let scaleDowns = 0;
 
-  for (let t = 0; t <= config.simulationSeconds; t++) {
-    // 1. Calculate inputs for this tick
-    // Note: Latency is calculated based on start-of-tick state
-    let latency = 0;
-    const processingCapacity = currentPods * config.processingRatePerPod;
+  // Track the last known HPA decisions to persist them between sync intervals
+  let lastDesiredReplicasRaw = currentPods;
+  let lastDesiredReplicasEffective = currentPods;
+
+  for (let t = 0; t <= simSeconds; t++) {
+    // --- CONTINUOUS PHYSICS (Runs every second) ---
+
+    // 0. Update Pod Readiness
+    // Decrement delay for pending pods
+    pendingPods = pendingPods.map(d => d - 1);
+    // Move newly ready pods
+    const newlyReadyCount = pendingPods.filter(d => d <= 0).length;
+    readyPods += newlyReadyCount;
+    // Keep only still pending
+    pendingPods = pendingPods.filter(d => d > 0);
     
-    if (currentPods > 0 && config.processingRatePerPod > 0) {
-      latency = currentQueue / processingCapacity;
+    // Safety clamp
+    readyPods = Math.min(readyPods, currentPods); 
+
+    // 1. Calculate Physical Stats (Start of Tick)
+    const processingCapacity = readyPods * procRate;
+    let currentLatency = 0;
+    
+    if (readyPods > 0 && procRate > 0) {
+        currentLatency = currentQueue / processingCapacity;
     } else if (currentQueue > 0) {
-      latency = 9999; // Infinite latency
-    } else {
-      latency = 0;
+        currentLatency = 9999; // Infinite latency (stuck queue)
     }
 
     // 2. Queue Dynamics (Process & Produce)
-    const arrivals = config.producingRateTotal; // 1 second interval
+    const arrivals = prodRate; 
     const processed = Math.min(currentQueue + arrivals, processingCapacity);
     const nextQueue = Math.max(0, currentQueue + arrivals - processed);
-
-    // 3. HPA Core Formula
-    let desiredReplicasRaw = currentPods;
-    const ratio = latency / config.targetLatencySeconds;
     
-    // Apply tolerance
-    if (Math.abs(ratio - 1.0) > config.toleranceFraction) {
-      desiredReplicasRaw = Math.ceil(currentPods * ratio);
-    }
+    // 3. CPU Load Calculation
+    // Load = (Processed Jobs / Total Capacity) * 100
+    // If capacity is 0, load is 0 (or undefined, but 0 prevents div/0 errors)
+    const currentCpuLoad = processingCapacity > 0 
+        ? (processed / processingCapacity) * 100 
+        : 0;
 
-    // Initial clamping
-    desiredReplicasRaw = Math.min(Math.max(desiredReplicasRaw, config.minPods), config.maxPods);
+    // --- DISCRETE CONTROL (Runs every HPA_SYNC_PERIOD seconds) ---
     
-    // Store raw recommendation for stabilization lookback
-    desiredReplicasHistory.push(desiredReplicasRaw);
-
-    // 4. Stabilization
-    // Determine Scale Direction based on Raw vs Current
-    // Note: This logic follows K8s 1.26+ common approach where we check both windows
-    
-    let stabilizedRecommendation = desiredReplicasRaw;
-
-    // Scale Up Stabilization: Min of window
-    // (We use desiredReplicasHistory which includes current 't')
-    if (config.scaleUp.stabilizationWindowSeconds > 0) {
-      let minInWindow = desiredReplicasRaw;
-      for (let i = 0; i <= config.scaleUp.stabilizationWindowSeconds; i++) {
-        const val = getDesiredReplicaAt(t - i);
-        if (val < minInWindow) minInWindow = val;
-      }
-      // If our raw intent is to scale up (raw > current), limits apply.
-      // If raw < current, we use the raw (which might be handled by down stabilization)
-      // Standard algorithm: Calculate separate stabilized proposals.
-      if (desiredReplicasRaw > currentPods) {
-          stabilizedRecommendation = minInWindow; 
-      }
-    }
-
-    // Scale Down Stabilization: Max of window
-    if (config.scaleDown.stabilizationWindowSeconds > 0) {
-      let maxInWindow = desiredReplicasRaw;
-      for (let i = 0; i <= config.scaleDown.stabilizationWindowSeconds; i++) {
-        const val = getDesiredReplicaAt(t - i);
-        if (val > maxInWindow) maxInWindow = val;
-      }
-      if (desiredReplicasRaw < currentPods) {
-        stabilizedRecommendation = maxInWindow;
-      }
-    }
-    
-    // If directions conflict or equal, we basically hold or follow the safer path. 
-    // Simplified: stabilizedRecommendation is now our target before policies.
-
-    // 5. Apply Policies
-    let desiredReplicasEffective = stabilizedRecommendation;
+    let currentMetricValue = 0;
     let direction: 'up' | 'down' | 'none' = 'none';
 
-    if (stabilizedRecommendation > currentPods) {
-      direction = 'up';
-    } else if (stabilizedRecommendation < currentPods) {
-      direction = 'down';
+    if (t % HPA_SYNC_PERIOD === 0) {
+        // A. Calculate Metric for HPA
+        if (config.metricType === 'QueueLatency') {
+            currentMetricValue = currentLatency;
+        } else if (config.metricType === 'QueueLength') {
+            currentMetricValue = currentQueue;
+        } else if (config.metricType === 'AvgCPULoad') {
+            currentMetricValue = currentCpuLoad;
+        }
+
+        // B. HPA Core Formula
+        let desiredReplicasRaw = currentPods;
+        const safeTarget = targetMetric > 0 ? targetMetric : 1;
+        
+        // HPA Formula: desiredReplicas = ceil[currentReplicas * ( currentMetricValue / desiredMetricValue )]
+        const ratio = currentMetricValue / safeTarget;
+        
+        // Apply tolerance
+        if (Math.abs(ratio - 1.0) > tolerance) {
+            desiredReplicasRaw = Math.ceil(currentPods * ratio);
+        }
+
+        // Initial clamping
+        desiredReplicasRaw = Math.min(Math.max(desiredReplicasRaw, minPods), maxPods);
+        
+        // Update persistent state for non-sync ticks
+        lastDesiredReplicasRaw = desiredReplicasRaw;
+
+        // C. Stabilization
+        // We push to history below, but we need to read from history now.
+        // Important: We haven't pushed the *current* raw value yet. 
+        // Logic: look back window starts from *now* (including this raw value usually) or t-1.
+        // Standard HPA implementation usually considers the current calculation as part of the window.
+        
+        let stabilizedRecommendation = desiredReplicasRaw;
+
+        // Scale Up Stabilization: Min of window
+        if (config.scaleUp && config.scaleUp.stabilizationWindowSeconds > 0) {
+            let minInWindow = desiredReplicasRaw;
+            // Check history. 
+            for (let i = 1; i <= config.scaleUp.stabilizationWindowSeconds; i++) {
+                const val = getDesiredReplicaAt(t - i);
+                if (val < minInWindow) minInWindow = val;
+            }
+            if (desiredReplicasRaw > currentPods) {
+                stabilizedRecommendation = minInWindow; 
+            }
+        }
+
+        // Scale Down Stabilization: Max of window
+        if (config.scaleDown && config.scaleDown.stabilizationWindowSeconds > 0) {
+            let maxInWindow = desiredReplicasRaw;
+            for (let i = 1; i <= config.scaleDown.stabilizationWindowSeconds; i++) {
+                const val = getDesiredReplicaAt(t - i);
+                if (val > maxInWindow) maxInWindow = val;
+            }
+            if (desiredReplicasRaw < currentPods) {
+                stabilizedRecommendation = maxInWindow;
+            }
+        }
+
+        // D. Apply Policies
+        let desiredReplicasEffective = stabilizedRecommendation;
+
+        if (stabilizedRecommendation > currentPods) {
+            direction = 'up';
+        } else if (stabilizedRecommendation < currentPods) {
+            direction = 'down';
+        }
+
+        if (direction === 'up' && config.scaleUp) {
+            const behavior = config.scaleUp;
+            if (behavior.selectPolicy === 'Disabled') {
+                desiredReplicasEffective = currentPods;
+            } else {
+                const allowedPods: number[] = [];
+                behavior.policies.forEach(policy => {
+                    const referencePods = getPodsAt(t - policy.periodSeconds);
+                    const limitAmount = getLimitValue(policy.type, policy.value, referencePods);
+                    allowedPods.push(referencePods + limitAmount);
+                });
+
+                if (allowedPods.length > 0) {
+                    const limit = behavior.selectPolicy === 'Min' 
+                        ? Math.min(...allowedPods) 
+                        : Math.max(...allowedPods);
+                    desiredReplicasEffective = Math.min(stabilizedRecommendation, limit);
+                }
+            }
+        } else if (direction === 'down' && config.scaleDown) {
+            const behavior = config.scaleDown;
+            if (behavior.selectPolicy === 'Disabled') {
+                desiredReplicasEffective = currentPods;
+            } else {
+                const allowedPods: number[] = [];
+                behavior.policies.forEach(policy => {
+                    const referencePods = getPodsAt(t - policy.periodSeconds);
+                    const limitAmount = getLimitValue(policy.type, policy.value, referencePods);
+                    allowedPods.push(Math.max(0, referencePods - limitAmount));
+                });
+
+                if (allowedPods.length > 0) {
+                    const limit = behavior.selectPolicy === 'Min'
+                        ? Math.max(...allowedPods) 
+                        : Math.min(...allowedPods);
+                    desiredReplicasEffective = Math.max(stabilizedRecommendation, limit);
+                }
+            }
+        }
+
+        // E. Final Clamping & Application
+        desiredReplicasEffective = Math.min(Math.max(desiredReplicasEffective, minPods), maxPods);
+        lastDesiredReplicasEffective = desiredReplicasEffective;
+
+        // Apply changes to Pod counts
+        const delta = desiredReplicasEffective - currentPods;
+
+        if (delta > 0) {
+            scaleUps++;
+            currentPods += delta;
+            // Add new pods to pending queue
+            for (let i = 0; i < delta; i++) {
+                pendingPods.push(podDelay);
+            }
+        } else if (delta < 0) {
+            scaleDowns++;
+            currentPods += delta; // delta is negative
+            let removeCount = Math.abs(delta);
+            
+            // Logic: terminate pending pods first, then ready pods.
+            while (removeCount > 0 && pendingPods.length > 0) {
+                pendingPods.pop();
+                removeCount--;
+            }
+            if (removeCount > 0) {
+                readyPods = Math.max(0, readyPods - removeCount);
+            }
+        }
+    } else {
+        // In between HPA ticks:
+        // Calculate the metric just for visualization, but DO NOT use it for scaling.
+         if (config.metricType === 'QueueLatency') {
+            currentMetricValue = currentLatency;
+        } else if (config.metricType === 'QueueLength') {
+            currentMetricValue = currentQueue;
+        } else if (config.metricType === 'AvgCPULoad') {
+            currentMetricValue = currentCpuLoad;
+        }
+        // Direction is none
+        direction = 'none';
+        // desiredReplicas logic holds previous values
     }
 
-    if (direction === 'up') {
-      const behavior = config.scaleUp;
-      if (behavior.selectPolicy === 'Disabled') {
-        desiredReplicasEffective = currentPods;
-      } else {
-        const allowedPods: number[] = [];
-        // Calculate limit for each policy
-        behavior.policies.forEach(policy => {
-          // Limit is based on pods 'periodSeconds' ago
-          const referencePods = getPodsAt(t - policy.periodSeconds);
-          const limitAmount = getLimitValue(policy.type, policy.value, referencePods);
-          allowedPods.push(referencePods + limitAmount);
-        });
+    // --- RECORD HISTORY & POINT ---
 
-        // If no policies, assumed unbounded (just min/max global)
-        // If policies exist, apply SelectPolicy
-        if (allowedPods.length > 0) {
-          const limit = behavior.selectPolicy === 'Min' 
-            ? Math.min(...allowedPods) 
-            : Math.max(...allowedPods);
-          desiredReplicasEffective = Math.min(stabilizedRecommendation, limit);
-        }
-      }
-    } else if (direction === 'down') {
-      const behavior = config.scaleDown;
-      if (behavior.selectPolicy === 'Disabled') {
-        desiredReplicasEffective = currentPods;
-      } else {
-        const allowedPods: number[] = [];
-        behavior.policies.forEach(policy => {
-            const referencePods = getPodsAt(t - policy.periodSeconds);
-            const limitAmount = getLimitValue(policy.type, policy.value, referencePods);
-            allowedPods.push(Math.max(0, referencePods - limitAmount));
-        });
-
-        if (allowedPods.length > 0) {
-           // For scale down:
-           // 'Max' policy means we allow the MAXIMUM reduction? 
-           // NO. 'selectPolicy' chooses which *policy value* to use.
-           // However, K8s docs say: "selectPolicy... Min... allows the smallest change in replica count."
-           // So for Scale Down:
-           //   limit1 (pods=1) -> allows removing 1 pod. Target = Current - 1.
-           //   limit2 (percent=10%) -> allows removing 10%. Target = Current * 0.9.
-           //   Max policy -> Allows maximum change (remove more). Result is min(Target1, Target2).
-           //   Min policy -> Allows minimum change (remove fewer). Result is max(Target1, Target2).
-           
-           // Let's rephrase in terms of "Resulting Pods":
-           // limit1_floor = 10. limit2_floor = 15.
-           // "Max" change means going lower. So min(10, 15) = 10.
-           // "Min" change means staying higher. So max(10, 15) = 15.
-           
-           const limit = behavior.selectPolicy === 'Min'
-             ? Math.max(...allowedPods) // Minimum change = highest floor
-             : Math.min(...allowedPods); // Maximum change = lowest floor
-             
-           desiredReplicasEffective = Math.max(stabilizedRecommendation, limit);
-        }
-      }
-    }
-
-    // 6. Final Clamping & Update
-    desiredReplicasEffective = Math.min(Math.max(desiredReplicasEffective, config.minPods), config.maxPods);
-    
-    // Check if a scaling event actually happened
-    if (desiredReplicasEffective > currentPods) scaleUps++;
-    if (desiredReplicasEffective < currentPods) scaleDowns++;
+    // History tracks what happened at this second
+    desiredReplicasHistory.push(lastDesiredReplicasRaw);
+    podHistory.push(currentPods);
 
     points.push({
       t,
       pods: currentPods,
+      readyPods: readyPods,
       queueJobs: currentQueue,
-      latency,
+      latency: currentLatency,
+      cpuLoad: currentCpuLoad,
+      metricValue: currentMetricValue,
       processedJobs: processed,
-      desiredReplicasRaw,
-      desiredReplicasEffective,
+      desiredReplicasRaw: lastDesiredReplicasRaw,
+      desiredReplicasEffective: lastDesiredReplicasEffective,
       scaleDirection: direction
     });
 
-    // Update state for next tick
-    podHistory.push(desiredReplicasEffective);
-    currentPods = desiredReplicasEffective;
     currentQueue = nextQueue;
   }
 
-  // Calculate Summary
-  const maxLatency = Math.max(...points.map(p => p.latency));
+  if (points.length === 0) {
+    return {
+      points: [],
+      summary: {
+        maxMetricValue: 0,
+        maxQueueJobs: 0,
+        finalPods: startingPods,
+        finalQueueJobs: 0,
+        totalScaleUps: 0,
+        totalScaleDowns: 0
+      }
+    };
+  }
+
+  const maxMetric = Math.max(...points.map(p => p.metricValue));
   const maxQueue = Math.max(...points.map(p => p.queueJobs));
   const finalPoint = points[points.length - 1];
 
   return {
     points,
     summary: {
-      maxLatency,
+      maxMetricValue: maxMetric,
       maxQueueJobs: maxQueue,
       finalPods: finalPoint.pods,
       finalQueueJobs: finalPoint.queueJobs,

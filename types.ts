@@ -1,5 +1,6 @@
 export type ScalePolicyType = 'Pods' | 'Percent';
 export type SelectPolicy = 'Max' | 'Min' | 'Disabled';
+export type MetricType = 'QueueLatency' | 'QueueLength' | 'AvgCPULoad';
 
 export interface ScalePolicy {
   id: string; // unique id for UI list handling
@@ -15,18 +16,22 @@ export interface ScaleBehavior {
 }
 
 export interface SimulatorConfig {
+  // Metric Selection
+  metricType: MetricType;
+
   // Workload
   minPods: number;
   maxPods: number;
   startingPods: number;
   initialQueueJobs: number;
-  initialLatencySeconds: number;
+  initialMetricValue: number; // Generic start value (e.g. latency)
   processingRatePerPod: number; // jobs/sec/pod
   producingRateTotal: number; // jobs/sec
+  podStartupDelay: number; // seconds before a new pod is ready
   
   // Simulation
   simulationSeconds: number;
-  targetLatencySeconds: number;
+  targetMetricValue: number; // Generic target (e.g. target latency)
   toleranceFraction: number;
 
   // Behavior
@@ -36,9 +41,12 @@ export interface SimulatorConfig {
 
 export interface SimulationPoint {
   t: number;
-  pods: number;
+  pods: number; // Total pods (replicas)
+  readyPods: number; // Pods contributing to capacity
   queueJobs: number;
-  latency: number;
+  latency: number; // Physical latency
+  cpuLoad: number; // CPU Load % (Processed / Capacity)
+  metricValue: number; // The computed metric value used for HPA
   processedJobs: number;
   desiredReplicasRaw: number;
   desiredReplicasEffective: number;
@@ -48,7 +56,7 @@ export interface SimulationPoint {
 export interface SimulationResult {
   points: SimulationPoint[];
   summary: {
-    maxLatency: number;
+    maxMetricValue: number;
     maxQueueJobs: number;
     finalPods: number;
     finalQueueJobs: number;
