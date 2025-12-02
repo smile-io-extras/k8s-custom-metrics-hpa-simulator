@@ -100,6 +100,7 @@ const App: React.FC = () => {
                         options={[
                           { value: 'QueueLatency', label: 'Queue Latency' },
                           { value: 'QueueLength', label: 'Queue Length' },
+                          { value: 'AvgCPULoad', label: 'Avg CPU Load (%)' },
                         ]} 
                       />
                       <div className="grid grid-cols-2 gap-3 mt-2">
@@ -206,7 +207,9 @@ const App: React.FC = () => {
             <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 text-sm text-blue-800">
               <p className="font-semibold mb-1">About this Simulation</p>
               <p className="opacity-90 leading-relaxed">
-                This tool simulates Kubernetes HPA v2 behavior on a discrete 1-second interval. It calculates the metric (<b>{config.metricType === 'QueueLatency' ? 'Queue Latency' : 'Queue Length'}</b>) based on queue depth and processing capacity. 
+                This tool simulates Kubernetes HPA v2 behavior on a discrete 1-second interval. It calculates the metric 
+                (<b>{config.metricType === 'QueueLatency' ? 'Queue Latency' : config.metricType === 'QueueLength' ? 'Queue Length' : 'Average CPU Load'}</b>) 
+                based on queue depth and processing capacity. 
                 Desired replicas are computed via <code>ceil(currentReplicas * (currentMetric / targetMetric))</code>. 
                 Stabilization windows use the conservative approach (Min for ScaleUp, Max for ScaleDown) over the window duration.
                 Scale Up events incur a pod startup delay if configured.

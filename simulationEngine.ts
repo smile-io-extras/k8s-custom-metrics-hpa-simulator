@@ -50,6 +50,8 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
       } else if (config.metricType === 'QueueLength') {
         currentQueue = Math.ceil(Number(config.initialMetricValue));
       }
+      // For AvgCPULoad, initial metric value doesn't map directly to queue easily without more assumptions (it maps to processed jobs), 
+      // so we ignore it for queue initialization to keep it simple, or user sets initialQueueJobs directly.
   }
 
   // History for stabilization and policies
@@ -113,6 +115,13 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
     const arrivals = prodRate; 
     const processed = Math.min(currentQueue + arrivals, processingCapacity);
     const nextQueue = Math.max(0, currentQueue + arrivals - processed);
+    
+    // 3. CPU Load Calculation
+    // Load = (Processed Jobs / Total Capacity) * 100
+    // If capacity is 0, load is 0 (or undefined, but 0 prevents div/0 errors)
+    const currentCpuLoad = processingCapacity > 0 
+        ? (processed / processingCapacity) * 100 
+        : 0;
 
     // --- DISCRETE CONTROL (Runs every HPA_SYNC_PERIOD seconds) ---
     
@@ -125,11 +134,15 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
             currentMetricValue = currentLatency;
         } else if (config.metricType === 'QueueLength') {
             currentMetricValue = currentQueue;
+        } else if (config.metricType === 'AvgCPULoad') {
+            currentMetricValue = currentCpuLoad;
         }
 
         // B. HPA Core Formula
         let desiredReplicasRaw = currentPods;
         const safeTarget = targetMetric > 0 ? targetMetric : 1;
+        
+        // HPA Formula: desiredReplicas = ceil[currentReplicas * ( currentMetricValue / desiredMetricValue )]
         const ratio = currentMetricValue / safeTarget;
         
         // Apply tolerance
@@ -260,6 +273,8 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
             currentMetricValue = currentLatency;
         } else if (config.metricType === 'QueueLength') {
             currentMetricValue = currentQueue;
+        } else if (config.metricType === 'AvgCPULoad') {
+            currentMetricValue = currentCpuLoad;
         }
         // Direction is none
         direction = 'none';
@@ -278,6 +293,7 @@ export const runSimulation = (config: SimulatorConfig): SimulationResult => {
       readyPods: readyPods,
       queueJobs: currentQueue,
       latency: currentLatency,
+      cpuLoad: currentCpuLoad,
       metricValue: currentMetricValue,
       processedJobs: processed,
       desiredReplicasRaw: lastDesiredReplicasRaw,

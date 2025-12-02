@@ -1,6 +1,6 @@
 export type ScalePolicyType = 'Pods' | 'Percent';
 export type SelectPolicy = 'Max' | 'Min' | 'Disabled';
-export type MetricType = 'QueueLatency' | 'QueueLength';
+export type MetricType = 'QueueLatency' | 'QueueLength' | 'AvgCPULoad';
 
 export interface ScalePolicy {
   id: string; // unique id for UI list handling
@@ -45,6 +45,7 @@ export interface SimulationPoint {
   readyPods: number; // Pods contributing to capacity
   queueJobs: number;
   latency: number; // Physical latency
+  cpuLoad: number; // CPU Load % (Processed / Capacity)
   metricValue: number; // The computed metric value used for HPA
   processedJobs: number;
   desiredReplicasRaw: number;

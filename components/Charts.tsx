@@ -17,6 +17,9 @@ const CustomTooltip = ({ active, payload, label }: any) => {
            <span className="text-slate-500">Metric Value:</span>
            <span className="font-mono">{data.metricValue.toFixed(2)}</span>
 
+           <span className="text-slate-500">CPU Load:</span>
+           <span className="font-mono">{data.cpuLoad.toFixed(1)}%</span>
+
            <span className="text-slate-500">Total Pods:</span>
            <span className="font-mono font-bold">{data.pods}</span>
 
@@ -166,6 +169,46 @@ export const Charts: React.FC<Props> = ({ data, targetMetricValue, metricType })
               dataKey="queueJobs"
               name="Queue Size"
               stroke="#818cf8"
+              strokeWidth={2}
+              dot={false}
+              isAnimationActive={false}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Chart 4: CPU Load */}
+      <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200 h-80">
+        <h3 className="text-sm font-semibold text-slate-700 mb-4">Average CPU Load vs Time</h3>
+        <ResponsiveContainer width="100%" height="90%">
+          <LineChart data={data}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+            <XAxis 
+              dataKey="t" 
+              type="number" 
+              domain={['dataMin', 'dataMax']} 
+              tick={{fontSize: 12, fill: '#64748b'}}
+              label={{ value: 'Seconds', position: 'insideBottomRight', offset: -5, fontSize: 10, fill: '#64748b' }}
+            />
+            <YAxis 
+              tick={{fontSize: 12, fill: '#64748b'}}
+              label={{ value: 'Load (%)', angle: -90, position: 'insideLeft', fontSize: 10, fill: '#64748b' }}
+              domain={[0, 100]}
+              allowDataOverflow={true}
+            />
+            <Tooltip content={<CustomTooltip />} />
+            
+            {metricType === 'AvgCPULoad' && (
+               <ReferenceLine y={targetMetricValue} stroke="#ef4444" strokeDasharray="3 3" label={{ value: 'Target', fill: '#ef4444', fontSize: 10, position: 'insideTopRight' }} />
+            )}
+
+            <Legend verticalAlign="top" height={36} iconSize={10} wrapperStyle={{fontSize: '12px'}}/>
+
+            <Line
+              type="monotone"
+              dataKey="cpuLoad"
+              name="Avg CPU Load"
+              stroke="#f59e0b"
               strokeWidth={2}
               dot={false}
               isAnimationActive={false}
